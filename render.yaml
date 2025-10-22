@@ -1,0 +1,7 @@
+services:
+  - type: worker
+    name: duty-telegram-bot
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python duty_bot.py"
+    plan: free
