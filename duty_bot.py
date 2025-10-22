@@ -14,14 +14,19 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from flask import Flask, request
 
 # --- НАСТРОЙКИ ---
 TOKEN = "8347643283:AAFKD80QRaKeU_g0A1Eav7UVVKHieOpUIKA" # Не забудьте вставить ваш актуальный токен
-
-# Список username'ов тех, кто может управлять ботом
 ADMIN_USERNAMES = ["phsquadd", "saduevvv18"]
+# URL вашего сервиса на Render (например, https://duty-telegram-bot.onrender.com)
+# Вы узнаете его после первого развертывания. Пока можно оставить пустым.
+WEBHOOK_URL = "https://ВАШ_АДРЕС_НА_RENDER.onrender.com"
 
 # --- КОНФИГУРАЦИЯ ФАЙЛОВ И ДАННЫХ ---
+# На Render файловая система временная, поэтому при перезапуске данные будут сбрасываться.
+# Для хранения данных между перезапусками нужен платный тариф с диском.
+# Но для нашего случая, когда мастер-список создается при старте, это приемлемо.
 DATA_DIR = "data"
 MASTER_LIST_FILE = os.path.join(DATA_DIR, "master_list.json")
 CURRENT_POOL_FILE = os.path.join(DATA_DIR, "current_pool.json")
@@ -33,13 +38,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+# --- Инициализация бота и веб-сервера ---
+application = Application.builder().token(TOKEN).build()
+app = Flask(__name__) # Создаем веб-сервер
 
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (остаются без изменений) ---
 def setup_files():
     if not os.path.exists(DATA_DIR):
         os.makedirs(DATA_DIR)
-    # При первом запуске создаем пустой мастер-файл, если его нет
     if not os.path.exists(MASTER_LIST_FILE):
+        # ВАЖНО: Теперь мастер-список нужно будет заполнять через команду /manage
         save_data([], MASTER_LIST_FILE)
         logger.info(f"Создан пустой мастер-файл: {MASTER_LIST_FILE}")
 
@@ -55,8 +63,7 @@ def save_data(data, file_path):
     with open(file_path, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
-# --- ОБРАБОТЧИКИ КОМАНД ---
-
+# --- ОБРАБОТЧИКИ КОМАНД (остаются без изменений) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.message.from_user.first_name
     message = (
@@ -72,7 +79,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(message)
 
-# ... (команды go, list, reset, today остаются без изменений) ...
 async def go(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.username not in ADMIN_USERNAMES:
         await update.message.reply_text("⛔️ У вас нет прав для запуска рулетки.")
@@ -135,15 +141,11 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message = f"🦸‍♂️ Сегодня дежурит последний герой: {last_winners[0]['name']} ({last_winners[0]['username']})"
     await update.message.reply_text(message)
 
-# --- НОВЫЙ БЛОК: УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ ---
-
 async def manage_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет меню управления пользователями."""
     user = update.message.from_user
     if user.username not in ADMIN_USERNAMES:
         await update.message.reply_text("⛔️ Эта команда доступна только администраторам.")
         return
-
     keyboard = [
         [InlineKeyboardButton("➕ Добавить пользователя", callback_data='manage_add')],
         [InlineKeyboardButton("➖ Удалить пользователя", callback_data='manage_remove')],
@@ -154,16 +156,12 @@ async def manage_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('Меню управления пользователями:', reply_markup=reply_markup)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает нажатия на inline-кнопки."""
     query = update.callback_query
-    await query.answer() # Обязательно, чтобы убрать "часики" на кнопке
-    
+    await query.answer()
     command = query.data
-
     if command == 'manage_add':
         context.user_data['next_step'] = 'add_user'
         await query.edit_message_text(text="Отправьте данные нового пользователя в формате:\n`Имя Фамилия @username`")
-    
     elif command == 'manage_list':
         master_list = load_data(MASTER_LIST_FILE)
         if not master_list:
@@ -171,40 +169,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             user_lines = [f"👤 {user['name']} ({user['username']})" for user in master_list]
             text = "📋 **Полный список пользователей:**\n\n" + "\n".join(user_lines)
-        await query.edit_message_text(text=text, reply_markup=query.message.reply_markup) # Оставляем меню
-
+        await query.edit_message_text(text=text, reply_markup=query.message.reply_markup)
     elif command == 'manage_remove':
         master_list = load_data(MASTER_LIST_FILE)
         if not master_list:
             await query.edit_message_text(text="Список пользователей пуст. Некого удалять.", reply_markup=query.message.reply_markup)
             return
-        keyboard = []
-        for user in master_list:
-            # callback_data должен быть уникальным, используем username
-            button = InlineKeyboardButton(f"❌ {user['name']}", callback_data=f"remove_{user['username']}")
-            keyboard.append([button])
+        keyboard = [[InlineKeyboardButton(f"❌ {user['name']}", callback_data=f"remove_{user['username']}")] for user in master_list]
         keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data='back_to_manage')])
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(text="Выберите пользователя для удаления:", reply_markup=reply_markup)
-
     elif command.startswith('remove_'):
         username_to_remove = query.data.split('_', 1)[1]
         master_list = load_data(MASTER_LIST_FILE)
-        
         user_to_remove = next((user for user in master_list if user['username'] == username_to_remove), None)
         if user_to_remove:
             master_list.remove(user_to_remove)
             save_data(master_list, MASTER_LIST_FILE)
-            
-            # Также удаляем из текущего пула, если он там есть
             current_pool = load_data(CURRENT_POOL_FILE)
             current_pool = [user for user in current_pool if user['username'] != username_to_remove]
             save_data(current_pool, CURRENT_POOL_FILE)
-
             await query.edit_message_text(text=f"✅ Пользователь {user_to_remove['name']} удален.")
         else:
             await query.edit_message_text(text="⚠️ Ошибка: пользователь не найден.")
-
     elif command == 'back_to_manage':
         keyboard = [
             [InlineKeyboardButton("➕ Добавить пользователя", callback_data='manage_add')],
@@ -214,64 +201,59 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text('Меню управления пользователями:', reply_markup=reply_markup)
-
     elif command == 'manage_close':
         await query.edit_message_text(text="Меню закрыто.")
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает текстовые сообщения для добавления пользователя."""
     if context.user_data.get('next_step') == 'add_user':
-        # Сбрасываем состояние, чтобы не обрабатывать следующие сообщения
         del context.user_data['next_step']
-        
         text = update.message.text
         try:
-            # Пытаемся разделить сообщение на имя и username
             parts = text.split('@')
             if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
                 raise ValueError("Неверный формат")
-            
             name = parts[0].strip()
             username = "@" + parts[1].strip()
-
             new_user = {"name": name, "username": username}
             master_list = load_data(MASTER_LIST_FILE)
-            
-            # Проверка на дубликат
             if any(user['username'] == new_user['username'] for user in master_list):
                 await update.message.reply_text(f"⚠️ Пользователь {username} уже есть в списке.")
                 return
-
             master_list.append(new_user)
             save_data(master_list, MASTER_LIST_FILE)
             await update.message.reply_text(f"✅ Пользователь {name} ({username}) успешно добавлен!")
-
         except Exception as e:
             await update.message.reply_text("❌ Ошибка. Пожалуйста, убедитесь, что вы отправили сообщение в формате: `Имя Фамилия @username`")
             logger.error(f"Ошибка добавления пользователя: {e}")
 
-# --- ГЛАВНАЯ ФУНКЦИЯ И ЗАПУСК ---
+# --- НОВЫЙ БЛОК: ЗАПУСК ЧЕРЕЗ WEBHOOK ---
+
+@app.route('/', methods=['POST'])
+def webhook():
+    """Эта функция принимает обновления от Telegram."""
+    update_data = request.get_json()
+    update = Update.de_json(update_data, application.bot)
+    application.create_task(application.process_update(update))
+    return '', 200
 
 def main():
-    """Основная функция для запуска бота."""
+    """Эта функция теперь только настраивает бота."""
     setup_files()
-    application = Application.builder().token(TOKEN).build()
-
-    # Регистрируем обработчики команд
+    # Регистрируем все наши обработчики
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("go", go))
     application.add_handler(CommandHandler("list", list_participants))
     application.add_handler(CommandHandler("reset", reset))
     application.add_handler(CommandHandler("today", today))
-    application.add_handler(CommandHandler("manage", manage_users)) # Новая команда
-    
-    # Регистрируем обработчики кнопок и текста
+    application.add_handler(CommandHandler("manage", manage_users))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    
+    # Устанавливаем вебхук
+    application.create_task(application.bot.set_webhook(url=WEBHOOK_URL))
+    logger.info("Вебхук настроен!")
 
-    # Запускаем бота
-    logger.info("Бот запущен и готов к работе!")
-    application.run_polling()
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
+    # Веб-сервер запускается командой gunicorn из render.yaml,
+    # поэтому здесь больше ничего не нужно.

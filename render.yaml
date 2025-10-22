@@ -1,7 +1,7 @@
 services:
-  - type: worker
+  - type: web
     name: duty-telegram-bot
     env: python
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "python duty_bot.py"
+    startCommand: "gunicorn duty_bot:app"
     plan: free
