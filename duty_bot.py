@@ -5,6 +5,7 @@ import logging
 import random
 import json
 import os
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -19,14 +20,9 @@ from flask import Flask, request
 # --- НАСТРОЙКИ ---
 TOKEN = "8347643283:AAFKD80QRaKeU_g0A1Eav7UVVKHieOpUIKA" # Не забудьте вставить ваш актуальный токен
 ADMIN_USERNAMES = ["phsquadd", "saduevvv18"]
-# URL вашего сервиса на Render (например, https://duty-telegram-bot.onrender.com)
-# Вы узнаете его после первого развертывания. Пока можно оставить пустым.
-WEBHOOK_URL = "https://nojack.onrender.com"
+WEBHOOK_URL = "https://nojack.onrender.com" # Ваш URL на Render
 
 # --- КОНФИГУРАЦИЯ ФАЙЛОВ И ДАННЫХ ---
-# На Render файловая система временная, поэтому при перезапуске данные будут сбрасываться.
-# Для хранения данных между перезапусками нужен платный тариф с диском.
-# Но для нашего случая, когда мастер-список создается при старте, это приемлемо.
 DATA_DIR = "data"
 MASTER_LIST_FILE = os.path.join(DATA_DIR, "master_list.json")
 CURRENT_POOL_FILE = os.path.join(DATA_DIR, "current_pool.json")
@@ -40,14 +36,13 @@ logger = logging.getLogger(__name__)
 
 # --- Инициализация бота и веб-сервера ---
 application = Application.builder().token(TOKEN).build()
-app = Flask(__name__) # Создаем веб-сервер
+app = Flask(__name__)
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (остаются без изменений) ---
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (без изменений) ---
 def setup_files():
     if not os.path.exists(DATA_DIR):
         os.makedirs(DATA_DIR)
     if not os.path.exists(MASTER_LIST_FILE):
-        # ВАЖНО: Теперь мастер-список нужно будет заполнять через команду /manage
         save_data([], MASTER_LIST_FILE)
         logger.info(f"Создан пустой мастер-файл: {MASTER_LIST_FILE}")
 
@@ -63,7 +58,7 @@ def save_data(data, file_path):
     with open(file_path, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
-# --- ОБРАБОТЧИКИ КОМАНД (остаются без изменений) ---
+# --- ОБРАБОТЧИКИ КОМАНД (без изменений, кроме /start) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.message.from_user.first_name
     message = (
@@ -75,10 +70,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "**Только для администраторов:**\n"
         "`/go` - Запустить рулетку.\n"
         "`/reset` - Начать новый цикл дежурств.\n"
-        "`/manage` - Управление списком пользователей."
+        "`/manage` - Управление списком пользователей.\n"
+        "`/webhook_info` - Проверить статус вебхука."
     )
     await update.message.reply_text(message)
 
+# ... (остальные команды go, list, reset, today, manage, etc. остаются такими же) ...
 async def go(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.username not in ADMIN_USERNAMES:
         await update.message.reply_text("⛔️ У вас нет прав для запуска рулетки.")
@@ -226,18 +223,38 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Ошибка. Пожалуйста, убедитесь, что вы отправили сообщение в формате: `Имя Фамилия @username`")
             logger.error(f"Ошибка добавления пользователя: {e}")
 
-# --- НОВЫЙ БЛОК: ЗАПУСК ЧЕРЕЗ WEBHOOK ---
+# --- НОВАЯ КОМАНДА ДЛЯ ДИАГНОСТИКИ ---
+async def webhook_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает информацию о текущем вебхуке."""
+    if update.message.from_user.username not in ADMIN_USERNAMES:
+        await update.message.reply_text("⛔️ Эта команда доступна только администраторам.")
+        return
+    
+    webhook = await application.bot.get_webhook_info()
+    message = (
+        f"ℹ️ **Информация о вебхуке:**\n\n"
+        f"URL: `{webhook.url}`\n"
+        f"Ожидающие обновления: `{webhook.pending_update_count}`\n"
+        f"Последняя ошибка: `{webhook.last_error_message or 'Нет'}`"
+    )
+    await update.message.reply_text(message)
 
-@app.route('/', methods=['POST'])
+# --- ИЗМЕНЕННЫЙ БЛОК ЗАПУСКА ---
+
+@app.route('/', methods=['GET', 'POST'])
 def webhook():
     """Эта функция принимает обновления от Telegram."""
-    update_data = request.get_json()
-    update = Update.de_json(update_data, application.bot)
-    application.create_task(application.process_update(update))
-    return '', 200
+    if request.method == "POST":
+        update_data = request.get_json()
+        update = Update.de_json(update_data, application.bot)
+        application.create_task(application.process_update(update))
+        return '', 200
+    else:
+        # --- НОВОЕ: "Проверка здоровья" для Render ---
+        return "Бот жив и здоров!", 200
 
-def main():
-    """Эта функция теперь только настраивает бота."""
+async def setup_bot():
+    """Настраивает бота и устанавливает вебхук."""
     setup_files()
     # Регистрируем все наши обработчики
     application.add_handler(CommandHandler("start", start))
@@ -246,14 +263,20 @@ def main():
     application.add_handler(CommandHandler("reset", reset))
     application.add_handler(CommandHandler("today", today))
     application.add_handler(CommandHandler("manage", manage_users))
+    application.add_handler(CommandHandler("webhook_info", webhook_info)) # Новая команда
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     
     # Устанавливаем вебхук
-    application.create_task(application.bot.set_webhook(url=WEBHOOK_URL))
-    logger.info("Вебхук настроен!")
+    await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
+    logger.info(f"Вебхук установлен на {WEBHOOK_URL}")
 
 if __name__ == "__main__":
-    main()
-    # Веб-сервер запускается командой gunicorn из render.yaml,
-    # поэтому здесь больше ничего не нужно.
+    # Эта конструкция запускает настройку бота перед запуском веб-сервера
+    loop = asyncio.get_event_loop()
+    if loop.is_running():
+        loop.create_task(setup_bot())
+    else:
+        loop.run_until_complete(setup_bot())
+    
+    # Веб-сервер запускается командой gunicorn из render.yaml
