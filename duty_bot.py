@@ -247,10 +247,11 @@ def webhook():
     if request.method == "POST":
         update_data = request.get_json()
         update = Update.de_json(update_data, application.bot)
-        application.create_task(application.process_update(update))
+        # --- ВОТ ОНО, ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ ---
+        asyncio.run(application.process_update(update))
+        # ------------------------------------
         return '', 200
     else:
-        # --- НОВОЕ: "Проверка здоровья" для Render ---
         return "Бот жив и здоров!", 200
 
 async def setup_bot():
