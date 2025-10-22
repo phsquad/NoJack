@@ -18,9 +18,9 @@ from telegram.ext import (
 from flask import Flask, request
 
 # --- НАСТРОЙКИ ---
-TOKEN = "8347643283:AAFKD80QRaKeU_g0A1Eav7UVVKHieOpUIKA" # Не забудьте вставить ваш актуальный токен
+TOKEN = "8347643283:AAFKD80QRaKeU_g0A1Eav7UVVKHieOpUIKA"
 ADMIN_USERNAMES = ["phsquadd", "saduevvv18"]
-WEBHOOK_URL = "https://nojack.onrender.com" # Ваш URL на Render
+WEBHOOK_URL = "https://nojack.onrender.com"
 
 # --- КОНФИГУРАЦИЯ ФАЙЛОВ И ДАННЫХ ---
 DATA_DIR = "data"
@@ -35,10 +35,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Инициализация бота и веб-сервера ---
-application = Application.builder().token(TOKEN).build()
+# Убираем .build() отсюда, так как будем использовать контекстный менеджер
+application_builder = Application.builder().token(TOKEN)
 app = Flask(__name__)
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (без изменений) ---
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def setup_files():
     if not os.path.exists(DATA_DIR):
         os.makedirs(DATA_DIR)
@@ -58,7 +59,7 @@ def save_data(data, file_path):
     with open(file_path, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
-# --- ОБРАБОТЧИКИ КОМАНД (без изменений, кроме /start) ---
+# --- ОБРАБОТЧИКИ КОМАНД ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.message.from_user.first_name
     message = (
@@ -75,7 +76,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(message)
 
-# ... (остальные команды go, list, reset, today, manage, etc. остаются такими же) ...
 async def go(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.username not in ADMIN_USERNAMES:
         await update.message.reply_text("⛔️ У вас нет прав для запуска рулетки.")
@@ -223,14 +223,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Ошибка. Пожалуйста, убедитесь, что вы отправили сообщение в формате: `Имя Фамилия @username`")
             logger.error(f"Ошибка добавления пользователя: {e}")
 
-# --- НОВАЯ КОМАНДА ДЛЯ ДИАГНОСТИКИ ---
 async def webhook_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает информацию о текущем вебхуке."""
     if update.message.from_user.username not in ADMIN_USERNAMES:
         await update.message.reply_text("⛔️ Эта команда доступна только администраторам.")
         return
-    
-    webhook = await application.bot.get_webhook_info()
+    webhook = await context.bot.get_webhook_info()
     message = (
         f"ℹ️ **Информация о вебхуке:**\n\n"
         f"URL: `{webhook.url}`\n"
@@ -239,38 +236,41 @@ async def webhook_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(message)
 
-# --- ИЗМЕНЕННЫЙ БЛОК ЗАПУСКА ---
+# --- ФИНАЛЬНЫЙ, ИСПРАВЛЕННЫЙ БЛОК ЗАПУСКА ---
+
+# Регистрируем все наши обработчики
+application_builder.add_handler(CommandHandler("start", start))
+application_builder.add_handler(CommandHandler("go", go))
+application_builder.add_handler(CommandHandler("list", list_participants))
+application_builder.add_handler(CommandHandler("reset", reset))
+application_builder.add_handler(CommandHandler("today", today))
+application_builder.add_handler(CommandHandler("manage", manage_users))
+application_builder.add_handler(CommandHandler("webhook_info", webhook_info))
+application_builder.add_handler(CallbackQueryHandler(button_handler))
+application_builder.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
 @app.route('/', methods=['GET', 'POST'])
 def webhook():
     """Эта функция принимает обновления от Telegram."""
     if request.method == "POST":
-        update_data = request.get_json()
-        update = Update.de_json(update_data, application.bot)
-        # --- ВОТ ОНО, ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ ---
-        asyncio.run(application.process_update(update))
-        # ------------------------------------
+        asyncio.run(handle_update(request.get_json()))
         return '', 200
     else:
         return "Бот жив и здоров!", 200
 
+async def handle_update(update_data):
+    """Асинхронная функция для обработки одного обновления."""
+    async with application_builder.build() as application:
+        update = Update.de_json(update_data, application.bot)
+        await application.process_update(update)
+
 async def setup_bot():
     """Настраивает бота и устанавливает вебхук."""
     setup_files()
-    # Регистрируем все наши обработчики
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("go", go))
-    application.add_handler(CommandHandler("list", list_participants))
-    application.add_handler(CommandHandler("reset", reset))
-    application.add_handler(CommandHandler("today", today))
-    application.add_handler(CommandHandler("manage", manage_users))
-    application.add_handler(CommandHandler("webhook_info", webhook_info)) # Новая команда
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-    
-    # Устанавливаем вебхук
-    await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
-    logger.info(f"Вебхук установлен на {WEBHOOK_URL}")
+    # Используем контекстный менеджер для установки вебхука
+    async with application_builder.build() as application:
+        await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
+        logger.info(f"Вебхук установлен на {WEBHOOK_URL}")
 
 if __name__ == "__main__":
     # Эта конструкция запускает настройку бота перед запуском веб-сервера
@@ -279,5 +279,3 @@ if __name__ == "__main__":
         loop.create_task(setup_bot())
     else:
         loop.run_until_complete(setup_bot())
-    
-    # Веб-сервер запускается командой gunicorn из render.yaml
