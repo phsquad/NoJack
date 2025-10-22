@@ -3,5 +3,5 @@ services:
     name: duty-telegram-bot
     env: python
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "gunicorn duty_bot:app"
+    startCommand: "gunicorn --worker-tmp-dir /dev/shm duty_bot:app"
     plan: free

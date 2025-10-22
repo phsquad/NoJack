@@ -21,7 +21,7 @@ TOKEN = "8347643283:AAFKD80QRaKeU_g0A1Eav7UVVKHieOpUIKA" # Не забудьте
 ADMIN_USERNAMES = ["phsquadd", "saduevvv18"]
 # URL вашего сервиса на Render (например, https://duty-telegram-bot.onrender.com)
 # Вы узнаете его после первого развертывания. Пока можно оставить пустым.
-WEBHOOK_URL = "https://ВАШ_АДРЕС_НА_RENDER.onrender.com"
+WEBHOOK_URL = "https://nojack.onrender.com"
 
 # --- КОНФИГУРАЦИЯ ФАЙЛОВ И ДАННЫХ ---
 # На Render файловая система временная, поэтому при перезапуске данные будут сбрасываться.
