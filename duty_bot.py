@@ -17,40 +17,50 @@ from sqlalchemy.exc import OperationalError
 TOKEN = "8347643283:AAFKD80QRaKeU_g0A1Eav7UVVKHieOpUIKA"
 ADMIN_USERNAMES = ["phsquadd", "saduevvv18"]
 WEBHOOK_URL = "https://nojack.onrender.com"
-# Получаем адрес базы данных из переменных окружения Render
-DATABASE_URL = os.environ.get('postgresql://duty_bot_db_user:zw6UbHX9cYIpLCqvh0TuxJOzNUVslBbh@dpg-d3t6jo6r433s73eb11rg-a/duty_bot_db')
+
+# --- ИСПРАВЛЕНИЕ №1: Правильно читаем адрес из переменных окружения ---
+# Эта строка берет значение из настроек Render, которые мы сделали
+DATABASE_URL = os.environ.get('DATABASE_URL')
 
 # --- НАСТРОЙКА БАЗЫ ДАННЫХ ---
-engine = create_engine(DATABASE_URL)
-metadata = MetaData()
+# --- ИСПРАВЛЕНИЕ №2: Передаем переменную, а не строку, и обрабатываем ошибку ---
+db_available = False
+db_session = None
+engine = None
 
-# Описываем таблицы
-students = Table('students', metadata,
-    Column('id', Integer, primary_key=True),
-    Column('name', String(100), nullable=False),
-    Column('username', String(100), unique=True, nullable=False)
-)
+if DATABASE_URL:
+    try:
+        engine = create_engine(DATABASE_URL)
+        metadata = MetaData()
 
-current_pool = Table('current_pool', metadata,
-    Column('id', Integer, primary_key=True),
-    Column('username', String(100), unique=True, nullable=False)
-)
+        # Описываем таблицы
+        students = Table('students', metadata,
+            Column('id', Integer, primary_key=True),
+            Column('name', String(100), nullable=False),
+            Column('username', String(100), unique=True, nullable=False)
+        )
 
-last_winners = Table('last_winners', metadata,
-    Column('id', Integer, primary_key=True),
-    Column('name', String(100), nullable=False),
-    Column('username', String(100), nullable=False)
-)
+        current_pool = Table('current_pool', metadata,
+            Column('id', Integer, primary_key=True),
+            Column('username', String(100), unique=True, nullable=False)
+        )
 
-# Создаем таблицы, если их нет
-try:
-    metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
-    db_session = Session()
-    db_available = True
-except OperationalError:
-    db_available = False
-    print("!!! ОШИБКА: Не удалось подключиться к базе данных. Проверьте DATABASE_URL.")
+        last_winners = Table('last_winners', metadata,
+            Column('id', Integer, primary_key=True),
+            Column('name', String(100), nullable=False),
+            Column('username', String(100), nullable=False)
+        )
+
+        # Создаем таблицы, если их нет
+        metadata.create_all(engine)
+        Session = sessionmaker(bind=engine)
+        db_session = Session()
+        db_available = True
+        print("✅ Успешное подключение к базе данных.")
+    except Exception as e:
+        print(f"!!! ОШИБКА: Не удалось подключиться к базе данных. Ошибка: {e}")
+else:
+    print("!!! ОШИБКА: Переменная окружения DATABASE_URL не найдена.")
 
 # Настройка логирования
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -62,17 +72,19 @@ app = Flask(__name__)
 
 # --- НОВЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С БД ---
 def get_master_list_from_db():
+    if not db_available: return []
     return [{"name": s.name, "username": s.username} for s in db_session.query(students).all()]
 
 def get_pool_from_db():
+    if not db_available: return []
     return [s.username for s in db_session.query(current_pool).all()]
 
 def get_winners_from_db():
+    if not db_available: return []
     return [{"name": s.name, "username": s.username} for s in db_session.query(last_winners).all()]
 
 # --- ОБРАБОТЧИКИ КОМАНД (адаптированы под БД) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (код без изменений)
     user_name = update.message.from_user.first_name
     message = (
         f"👋 Привет, {user_name}!\n\n"
@@ -81,7 +93,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/list` - Показать, кто остался в рулетке.\n"
         "`/today` - Показать, кто дежурит сегодня.\n"
         "`/go` - Запустить рулетку (только для админов).\n"
-        "`/reset` - Начать новый цикл (только для админов)."
+        "`/reset` - Начать новый цикл (только для админов).\n\n"
+        "**ВАЖНО:** Список студентов теперь нужно добавлять через отдельный скрипт-менеджер."
     )
     await update.message.reply_text(message)
 
@@ -96,15 +109,13 @@ async def go(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     master_list = get_master_list_from_db()
-    
-    # Преобразуем список username'ов в полный список студентов
     pool_students = [s for s in master_list if s['username'] in pool_usernames]
 
     if len(pool_students) < 2:
         winner = pool_students[0]
         db_session.query(current_pool).delete()
         db_session.query(last_winners).delete()
-        db_session.add(last_winners.insert().values(name=winner['name'], username=winner['username']))
+        db_session.execute(last_winners.insert().values(name=winner['name'], username=winner['username']))
         db_session.commit()
         message = (f"🏆 Остался последний герой: {winner['name']} ({winner['username']})!\n\n"
                    "Цикл завершен. Для начала нового введите `/reset`.")
@@ -113,14 +124,12 @@ async def go(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     winners = random.sample(pool_students, 2)
     
-    # Удаляем победителей из пула
     for winner in winners:
         db_session.query(current_pool).filter(current_pool.c.username == winner['username']).delete()
     
-    # Сохраняем победителей
     db_session.query(last_winners).delete()
     for winner in winners:
-        db_session.add(last_winners.insert().values(name=winner['name'], username=winner['username']))
+        db_session.execute(last_winners.insert().values(name=winner['name'], username=winner['username']))
     db_session.commit()
 
     new_pool_count = db_session.query(current_pool).count()
@@ -150,12 +159,10 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     master_list = get_master_list_from_db()
     
-    # Очищаем и заполняем пул заново
     db_session.query(current_pool).delete()
     for student in master_list:
-        db_session.add(current_pool.insert().values(username=student['username']))
+        db_session.execute(current_pool.insert().values(username=student['username']))
     
-    # Очищаем победителей
     db_session.query(last_winners).delete()
     db_session.commit()
     
@@ -175,7 +182,7 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message = f"🦸‍♂️ Сегодня дежурит последний герой: {winners[0]['name']} ({winners[0]['username']})"
     await update.message.reply_text(message)
 
-# --- БЛОК ЗАПУСКА (без изменений) ---
+# --- БЛОК ЗАПУСКА ---
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("go", go))
 application.add_handler(CommandHandler("list", list_participants))
@@ -204,8 +211,6 @@ async def setup_bot():
     await application.start()
 
 if __name__ == "__main__":
-    # ВАЖНО: Теперь список студентов нужно будет добавить через скрипт-менеджер
-    # или вручную в базу данных.
     loop = asyncio.get_event_loop()
     if loop.is_running():
         loop.create_task(setup_bot())
