@@ -48,7 +48,6 @@ repo = github_api.get_repo(REPO_NAME) if github_api and REPO_NAME else None
 def setup_files():
     if not os.path.exists(DATA_DIR):
         os.makedirs(DATA_DIR)
-    # При запуске пытаемся скачать мастер-файл с GitHub
     try:
         if repo:
             file_content = repo.get_contents(FILE_PATH).decoded_content.decode('utf-8')
@@ -56,7 +55,7 @@ def setup_files():
                 f.write(file_content)
             logger.info("Мастер-файл успешно загружен с GitHub.")
     except Exception as e:
-        logger.error(f"Не удалось загрузить мастер-файл с GitHub: {e}. Будет использован пустой список.")
+        logger.error(f"Не удалось загрузить мастер-файл с GitHub: {e}. Будет создан пустой список.")
         save_data([], MASTER_LIST_FILE)
 
 def load_data(file_path):
@@ -90,7 +89,6 @@ async def save_master_list_to_github(new_data, commit_message, context: ContextT
 
 # --- ОБРАБОТЧИКИ КОМАНД ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (код без изменений)
     user_name = update.message.from_user.first_name
     message = (
         f"👋 Привет, {user_name}!\n\n"
@@ -104,7 +102,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(message)
 
-# ... (команды go, list, reset, today остаются такими же, как в упрощенной версии) ...
 async def go(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.username not in ADMIN_USERNAMES:
         await update.message.reply_text("⛔️ У вас нет прав для запуска рулетки.")
@@ -166,7 +163,6 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message = f"🦸‍♂️ Сегодня дежурит последний герой: {last_winners[0]['name']} ({last_winners[0]['username']})"
     await update.message.reply_text(message)
 
-# --- НОВЫЙ БЛОК УПРАВЛЕНИЯ С GITHUB ---
 async def manage_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     if user.username not in ADMIN_USERNAMES:
@@ -175,4 +171,7 @@ async def manage_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("➕ Добавить пользователя", callback_data='manage_add')],
         [InlineKeyboardButton("➖ Удалить пользователя", callback_data='manage_remove')],
-        [InlineKeyboardButton("📋 Показать всех"
+        [InlineKeyboardButton("📋 Показать всех", callback_data='manage_list')],
+        [InlineKeyboardButton("❌ Закрыть", callback_data='manage_close')],
+    ]
+    reply_markup = InlineKeyboardMa
