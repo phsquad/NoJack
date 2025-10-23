@@ -1,5 +1,5 @@
 python-telegram-bot
-pytz
-tzlocal==4.2
 Flask
 gunicorn
+psycopg2-binary
+SQLAlchemy
