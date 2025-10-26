@@ -3,142 +3,155 @@
 
 import logging
 import random
-import json
 import os
 import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from flask import Flask, request
+from sqlalchemy import create_engine, Column, Integer, String, MetaData, Table
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import OperationalError, IntegrityError
 
 # --- НАСТРОЙКИ ---
 TOKEN = "8347643283:AAFKD80QRaKeU_g0A1Eav7UVVKHieOpUIKA"
 ADMIN_USERNAMES = ["phsquadd", "saduevvv18"]
 WEBHOOK_URL = "https://nojack.onrender.com"
+DATABASE_URL = os.environ.get('DATABASE_URL')
 
-# --- КОНФИГУРАЦИЯ ФАЙЛОВ ---
-DATA_DIR = "data"
-MASTER_LIST_FILE = os.path.join(DATA_DIR, "master_list.json")
-CURRENT_POOL_FILE = os.path.join(DATA_DIR, "current_pool.json")
-LAST_WINNERS_FILE = os.path.join(DATA_DIR, "last_winners.json")
+# --- НАСТРОЙКА БАЗЫ ДАННЫХ ---
+db_available = False
+db_session = None
+try:
+    if not DATABASE_URL:
+        raise ValueError("Переменная окружения DATABASE_URL не найдена.")
+    engine = create_engine(DATABASE_URL)
+    metadata = MetaData()
+    students = Table('students', metadata,
+        Column('id', Integer, primary_key=True),
+        Column('name', String(100), nullable=False),
+        Column('username', String(100), unique=True, nullable=False)
+    )
+    current_pool = Table('current_pool', metadata,
+        Column('id', Integer, primary_key=True),
+        Column('username', String(100), unique=True, nullable=False)
+    )
+    last_winners = Table('last_winners', metadata,
+        Column('id', Integer, primary_key=True),
+        Column('name', String(100), nullable=False),
+        Column('username', String(100), nullable=False)
+    )
+    metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    db_session = Session()
+    db_available = True
+    print("✅ Успешное подключение к базе данных.")
+except (ValueError, OperationalError) as e:
+    print(f"!!! ОШИБКА ПОДКЛЮЧЕНИЯ К БД: {e}")
 
-# --- ВОЗВРАЩАЕМ ЖЕСТКИЙ СПИСОК СТУДЕНТОВ ---
-INITIAL_STUDENTS = [
-    {"name": "Андреев Александр", "username": "@phsquadd"},
-    {"name": "Абраменко Павел", "username": "@Pevlik12"},
-    {"name": "Андросов Макар", "username": "@CalamitAss"},
-    {"name": "Головань Елизавета", "username": "@Arp_ell"},
-    {"name": "Дологодин Денис", "username": "@Gvstaxx"},
-    {"name": "Дудник Александр", "username": "@llSirll"},
-    {"name": "Кузнецов Артем", "username": "@h0moxide"},
-    {"name": "Кривошеев Григорий", "username": "@SKOOKA2007"},
-    {"name": "Княгинин Вадим", "username": "@Liro26"},
-    {"name": "Маслевцов Иван", "username": "@maslov_vvv"},
-    {"name": "Садуев Азамат", "username": "@saduevvv18"},
-    {"name": "Прощалкин Дмитрий", "username": "@GopoChaechik"},
-    {"name": "Саруханов Александр", "username": "@kk80968"},
-    {"name": "Самодуров Елисей", "username": "@Prosto_EIKA"}
-]
-
-# Настройка логирования
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
-)
+# --- ИНИЦИАЛИЗАЦИЯ ---
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# --- Инициализация ---
 application = Application.builder().token(TOKEN).build()
 app = Flask(__name__)
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
-def setup_files():
-    # Создаем папку и мастер-файл из жесткого списка
-    os.makedirs(DATA_DIR, exist_ok=True)
-    save_data(INITIAL_STUDENTS, MASTER_LIST_FILE)
-    logger.info("Мастер-файл создан из жесткого списка.")
+# --- ФУНКЦИИ ДЛЯ РАБОТЫ С БД ---
+def get_master_list_from_db():
+    return [{"name": s.name, "username": s.username} for s in db_session.query(students).all()]
 
-def load_data(file_path):
-    if not os.path.exists(file_path): return []
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except (json.JSONDecodeError, FileNotFoundError):
-        return []
+def get_pool_from_db():
+    return [s.username for s in db_session.query(current_pool).all()]
 
-def save_data(data, file_path):
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    with open(file_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
+def get_winners_from_db():
+    return [{"name": s.name, "username": s.username} for s in db_session.query(last_winners).all()]
 
 # --- ОБРАБОТЧИКИ КОМАНД ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.message.from_user.first_name
-    message = (
-        f"👋 Привет, {user_name}!\n\n"
-        "Я бот-рулетка для определения дежурных.\n\n"
-        "**Команды:**\n"
-        "`/list` - Показать, кто остался в рулетке.\n"
-        "`/today` - Показать, кто дежурит сегодня.\n"
-        "`/go` - Запустить рулетку (только для админов).\n"
-        "`/reset` - Начать новый цикл (только для админов)."
-    )
+    message = (f"👋 Привет, {user_name}!\n\n"
+               "Я бот-рулетка с постоянной памятью.\n\n"
+               "`/list` - Показать, кто остался в рулетке.\n"
+               "`/today` - Показать, кто дежурит сегодня.\n"
+               "`/go` - Запустить рулетку (админ).\n"
+               "`/reset` - Начать новый цикл (админ).\n\n"
+               "**Управление списком:** через отдельный скрипт `manager.py`.")
     await update.message.reply_text(message)
 
 async def go(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.username not in ADMIN_USERNAMES:
-        await update.message.reply_text("⛔️ У вас нет прав для запуска рулетки.")
+        await update.message.reply_text("⛔️ У вас нет прав.")
         return
-    pool = load_data(CURRENT_POOL_FILE)
-    if not pool:
-        await update.message.reply_text("🎲 Пул дежурных пуст! Начните новый цикл командой `/reset`.")
+    pool_usernames = get_pool_from_db()
+    if not pool_usernames:
+        await update.message.reply_text("🎲 Пул пуст! Начните новый цикл командой `/reset`.")
         return
-    if len(pool) < 2:
-        winner = pool[0]
-        save_data([], CURRENT_POOL_FILE)
-        save_data([winner], LAST_WINNERS_FILE)
+    master_list = get_master_list_from_db()
+    pool_students = [s for s in master_list if s['username'] in pool_usernames]
+    if len(pool_students) < 2:
+        winner = pool_students[0]
+        db_session.query(current_pool).delete()
+        db_session.query(last_winners).delete()
+        db_session.execute(last_winners.insert().values(name=winner['name'], username=winner['username']))
+        db_session.commit()
         message = (f"🏆 Остался последний герой: {winner['name']} ({winner['username']})!\n\n"
                    "Цикл завершен. Для начала нового введите `/reset`.")
         await update.message.reply_text(message)
         return
-    winners = random.sample(pool, 2)
-    new_pool = [p for p in pool if p['username'] not in [w['username'] for w in winners]]
-    save_data(new_pool, CURRENT_POOL_FILE)
-    save_data(winners, LAST_WINNERS_FILE)
+    winners = random.sample(pool_students, 2)
+    for winner in winners:
+        db_session.query(current_pool).filter(current_pool.c.username == winner['username']).delete()
+    db_session.query(last_winners).delete()
+    for winner in winners:
+        db_session.execute(last_winners.insert().values(name=winner['name'], username=winner['username']))
+    db_session.commit()
+    new_pool_count = db_session.query(current_pool).count()
     message = (f"✨ Рулетка запущена! Сегодня дежурят:\n\n"
                f"👤 {winners[0]['name']} ({winners[0]['username']})\n"
                f"👤 {winners[1]['name']} ({winners[1]['username']})\n\n"
-               f"В рулетке осталось {len(new_pool)} участников.")
+               f"В рулетке осталось {new_pool_count} участников.")
     await update.message.reply_text(message)
 
 async def list_participants(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pool = load_data(CURRENT_POOL_FILE)
-    if not pool:
+    pool_usernames = get_pool_from_db()
+    if not pool_usernames:
         await update.message.reply_text("🎲 Пул дежурных пуст.")
         return
-    participant_lines = [f"👤 {p['name']} ({p['username']})" for p in pool]
+    master_list = get_master_list_from_db()
+    pool_students = [s for s in master_list if s['username'] in pool_usernames]
+    participant_lines = [f"👤 {p['name']} ({p['username']})" for p in pool_students]
     message = "👥 В рулетке остались:\n\n" + "\n".join(participant_lines)
     await update.message.reply_text(message)
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.username not in ADMIN_USERNAMES:
-        await update.message.reply_text("⛔️ У вас нет прав для выполнения этой команды.")
+        await update.message.reply_text("⛔️ У вас нет прав.")
         return
-    master_list = load_data(MASTER_LIST_FILE)
-    save_data(master_list, CURRENT_POOL_FILE)
-    save_data([], LAST_WINNERS_FILE)
+    master_list = get_master_list_from_db()
+    if not master_list:
+        await update.message.reply_text("⚠️ Список студентов пуст! Добавьте их через `manager.py`.")
+        return
+    db_session.query(current_pool).delete()
+    for student in master_list:
+        try:
+            db_session.execute(current_pool.insert().values(username=student['username']))
+        except IntegrityError: # Если вдруг такой username уже есть, просто пропускаем
+            db_session.rollback()
+            continue
+    db_session.query(last_winners).delete()
+    db_session.commit()
     message = f"✅ Новый цикл запущен! В рулетку снова загружено {len(master_list)} участников."
     await update.message.reply_text(message)
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    last_winners = load_data(LAST_WINNERS_FILE)
-    if not last_winners:
+    winners = get_winners_from_db()
+    if not winners:
         await update.message.reply_text("🤔 Дежурные на сегодня еще не выбраны.")
         return
-    if len(last_winners) == 2:
+    if len(winners) == 2:
         message = (f"👮‍♂️ Сегодня дежурят:\n\n"
-                   f"👤 {last_winners[0]['name']} ({last_winners[0]['username']})\n"
-                   f"👤 {last_winners[1]['name']} ({last_winners[1]['username']})")
+                   f"👤 {winners[0]['name']} ({winners[0]['username']})\n"
+                   f"👤 {winners[1]['name']} ({winners[1]['username']})")
     else:
-        message = f"🦸‍♂️ Сегодня дежурит последний герой: {last_winners[0]['name']} ({last_winners[0]['username']})"
+        message = f"🦸‍♂️ Сегодня дежурит последний герой: {winners[0]['name']} ({winners[0]['username']})"
     await update.message.reply_text(message)
 
 # --- БЛОК ЗАПУСКА ---
@@ -161,7 +174,9 @@ async def handle_update(update_data):
         await application.process_update(Update.de_json(update_data, application.bot))
 
 async def setup_bot():
-    setup_files()
+    if not db_available:
+        logger.error("База данных недоступна. Бот не может быть запущен.")
+        return
     await application.initialize()
     await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
     logger.info(f"Вебхук установлен на {WEBHOOK_URL}")
