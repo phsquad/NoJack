@@ -5,8 +5,15 @@ import logging
 import random
 import os
 import asyncio
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+)
 from flask import Flask, request
 from sqlalchemy import create_engine, Column, Integer, String, MetaData, Table
 from sqlalchemy.orm import sessionmaker
@@ -56,7 +63,7 @@ app = Flask(__name__)
 
 # --- ФУНКЦИИ ДЛЯ РАБОТЫ С БД ---
 def get_master_list_from_db():
-    return [{"name": s.name, "username": s.username} for s in db_session.query(students).all()]
+    return [{"id": s.id, "name": s.name, "username": s.username} for s in db_session.query(students).order_by(students.c.name).all()]
 
 def get_pool_from_db():
     return [s.username for s in db_session.query(current_pool).all()]
@@ -72,10 +79,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                "`/list` - Показать, кто остался в рулетке.\n"
                "`/today` - Показать, кто дежурит сегодня.\n"
                "`/go` - Запустить рулетку (админ).\n"
-               "`/reset` - Начать новый цикл (админ).\n\n"
-               "**Управление списком:** через отдельный скрипт `manager.py`.")
+               "`/reset` - Начать новый цикл (админ).\n"
+               "`/manage` - Управление списком студентов (админ).")
     await update.message.reply_text(message)
 
+# ... (команды go, list, reset, today остаются без изменений) ...
 async def go(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.username not in ADMIN_USERNAMES:
         await update.message.reply_text("⛔️ У вас нет прав.")
@@ -127,13 +135,13 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     master_list = get_master_list_from_db()
     if not master_list:
-        await update.message.reply_text("⚠️ Список студентов пуст! Добавьте их через `manager.py`.")
+        await update.message.reply_text("⚠️ Список студентов пуст! Добавьте их через `/manage`.")
         return
     db_session.query(current_pool).delete()
     for student in master_list:
         try:
             db_session.execute(current_pool.insert().values(username=student['username']))
-        except IntegrityError: # Если вдруг такой username уже есть, просто пропускаем
+        except IntegrityError:
             db_session.rollback()
             continue
     db_session.query(last_winners).delete()
@@ -154,12 +162,102 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message = f"🦸‍♂️ Сегодня дежурит последний герой: {winners[0]['name']} ({winners[0]['username']})"
     await update.message.reply_text(message)
 
+# --- НОВЫЙ БЛОК: УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ ЧЕРЕЗ БД ---
+async def manage_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    if user.username not in ADMIN_USERNAMES:
+        await update.message.reply_text("⛔️ Эта команда доступна только администраторам.")
+        return
+    keyboard = [
+        [InlineKeyboardButton("➕ Добавить пользователя", callback_data='manage_add')],
+        [InlineKeyboardButton("➖ Удалить пользователя", callback_data='manage_remove')],
+        [InlineKeyboardButton("📋 Показать всех", callback_data='manage_list')],
+        [InlineKeyboardButton("❌ Закрыть", callback_data='manage_close')],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text('Меню управления пользователями:', reply_markup=reply_markup)
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    command = query.data
+
+    if command == 'manage_add':
+        context.user_data['next_step'] = 'add_user'
+        await query.edit_message_text(text="Отправьте данные нового пользователя в формате:\n`Имя Фамилия @username`")
+    
+    elif command == 'manage_list':
+        master_list = get_master_list_from_db()
+        if not master_list:
+            text = "Список пользователей пуст."
+        else:
+            user_lines = [f"👤 {user['name']} ({user['username']})" for user in master_list]
+            text = "📋 **Полный список пользователей:**\n\n" + "\n".join(user_lines)
+        await query.edit_message_text(text=text, reply_markup=query.message.reply_markup)
+
+    elif command == 'manage_remove':
+        master_list = get_master_list_from_db()
+        if not master_list:
+            await query.edit_message_text(text="Список пуст, некого удалять.", reply_markup=query.message.reply_markup)
+            return
+        keyboard = [[InlineKeyboardButton(f"❌ {user['name']}", callback_data=f"remove_{user['id']}")] for user in master_list]
+        keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data='back_to_manage')])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(text="Выберите пользователя для удаления:", reply_markup=reply_markup)
+
+    elif command.startswith('remove_'):
+        user_id_to_remove = int(query.data.split('_', 1)[1])
+        user_to_remove = db_session.query(students).filter(students.c.id == user_id_to_remove).first()
+        if user_to_remove:
+            db_session.query(students).filter(students.c.id == user_id_to_remove).delete()
+            db_session.query(current_pool).filter(current_pool.c.username == user_to_remove.username).delete()
+            db_session.commit()
+            await query.edit_message_text(text=f"✅ Пользователь {user_to_remove.name} удален из всех списков.")
+        else:
+            await query.edit_message_text(text="⚠️ Ошибка: пользователь не найден.")
+
+    elif command == 'back_to_manage':
+        keyboard = [
+            [InlineKeyboardButton("➕ Добавить пользователя", callback_data='manage_add')],
+            [InlineKeyboardButton("➖ Удалить пользователя", callback_data='manage_remove')],
+            [InlineKeyboardButton("📋 Показать всех", callback_data='manage_list')],
+            [InlineKeyboardButton("❌ Закрыть", callback_data='manage_close')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text('Меню управления пользователями:', reply_markup=reply_markup)
+
+    elif command == 'manage_close':
+        await query.edit_message_text(text="Меню закрыто.")
+
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get('next_step') == 'add_user':
+        del context.user_data['next_step']
+        text = update.message.text
+        try:
+            parts = text.split('@')
+            if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+                raise ValueError("Неверный формат")
+            name = parts[0].strip()
+            username = "@" + parts[1].strip()
+            db_session.execute(students.insert().values(name=name, username=username))
+            db_session.commit()
+            await update.message.reply_text(f"✅ Пользователь {name} ({username}) успешно добавлен в базу данных!")
+        except IntegrityError:
+            db_session.rollback()
+            await update.message.reply_text(f"⚠️ Ошибка: Пользователь с username {username} уже существует.")
+        except Exception as e:
+            await update.message.reply_text("❌ Ошибка. Убедитесь, что формат: `Имя Фамилия @username`")
+            logger.error(f"Ошибка добавления пользователя: {e}")
+
 # --- БЛОК ЗАПУСКА ---
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("go", go))
 application.add_handler(CommandHandler("list", list_participants))
 application.add_handler(CommandHandler("reset", reset))
 application.add_handler(CommandHandler("today", today))
+application.add_handler(CommandHandler("manage", manage_users))
+application.add_handler(CallbackQueryHandler(button_handler))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
 @app.route('/', methods=['GET', 'POST'])
 def webhook():
