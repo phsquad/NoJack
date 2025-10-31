@@ -5,7 +5,7 @@ from sqlalchemy.exc import IntegrityError
 
 # --- НАСТРОЙКИ (ЗАПОЛНИТЕ САМИ) ---
 # Вставьте сюда "External Connection String" из настроек базы данных на Render
-DATABASE_URL = "postgresql://duty_bot_memory_user:17yQ8hyweOKpndVUosD4MV9dFsGUd9z7@dpg-d3v7mg2li9vc73ck8m30-a.oregon-postgres.render.com/duty_bot_memory"
+DATABASE_URL = "postgresql://duty_bot_memory_lu9y_user:Nii1uyhvLh2YbgK7o8jOvwLGmQ5qquKZ@dpg-d42eidh5pdvs73e7e83g-a.oregon-postgres.render.com/duty_bot_memory_lu9y"
 # --- КОНЕЦ НАСТРОЕК ---
 
 # Настройка такая же, как в основном боте
