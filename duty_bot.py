@@ -24,6 +24,7 @@ TOKEN = "8347643283:AAFKD80QRaKeU_g0A1Eav7UVVKHieOpUIKA"
 ADMIN_USERNAMES = ["phsquadd"]
 WEBHOOK_URL = "https://nojack.onrender.com"
 DATABASE_URL = os.environ.get('DATABASE_URL')
+DEBT_WEIGHT_MULTIPLIER = 5 # Коэффициент веса для должников
 
 # --- НАСТРОЙКА БАЗЫ ДАННЫХ ---
 db_available = False
@@ -82,8 +83,9 @@ def get_pool_from_db():
 def get_winners_from_db():
     return [{"name": s.name, "username": s.username} for s in db_session.query(last_winners).all()]
 
-# --- НОВАЯ ФУНКЦИЯ: Получение звания ---
 def get_rank(duty_count):
+    if duty_count >= 10000:
+        return "ВЕРХОВНЫЙ МАГИСТР ШВАБРЫ 👑"
     if duty_count >= 10:
         return "Магистр швабры 🧹"
     elif duty_count >= 5:
@@ -97,16 +99,12 @@ def get_rank(duty_count):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     user_name = user.first_name
-    
     if update.message.chat.type == 'private':
         student_record = get_student_by_username(f"@{user.username}")
         if student_record and not student_record.chat_id:
-            db_session.execute(
-                students.update().where(students.c.username == f"@{user.username}").values(chat_id=user.id)
-            )
+            db_session.execute(students.update().where(students.c.username == f"@{user.username}").values(chat_id=user.id))
             db_session.commit()
             await update.message.reply_text("Спасибо! Теперь я смогу присылать тебе личные уведомления о дежурстве.")
-
     await help_command(update, context)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -123,11 +121,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/manage` - Управление списком студентов.\n"
         "`/debt @username` - Добавить долг за пропуск.\n"
         "`/skip @username` - Временно убрать из рулетки.\n"
-        "`/unskip @username` - Вернуть в рулетку."
+        "`/unskip @username` - Вернуть в рулетку.\n"
+        "`/set_stats @username <число>` - Накрутить очки."
     )
     await update.message.reply_text(message)
 
-# ... (команда go остается без изменений, кроме упоминаний) ...
 async def go(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.username not in ADMIN_USERNAMES:
         await update.message.reply_text("⛔️ У вас нет прав.")
@@ -141,40 +139,29 @@ async def go(update: Update, context: ContextTypes.DEFAULT_TYPE):
     master_list = get_master_list_from_db()
     pool_students = [s for s in master_list if s['username'] in pool_usernames and s['is_active']]
     
-    debtors = [s for s in pool_students if s['duty_debt'] > 0]
-    winners = []
-    if len(debtors) >= 2:
-        winners = random.sample(debtors, 2)
-    elif len(debtors) == 1:
-        winners.append(debtors[0])
-        non_debtors = [s for s in pool_students if s['duty_debt'] == 0 and s['username'] != debtors[0]['username']]
-        if non_debtors:
-            winners.append(random.choice(non_debtors))
-        else:
-            await update.message.reply_text(f"В пуле остался только один участник (должник) {debtors[0]['name']}. Невозможно выбрать пару.")
-            return
+    if len(pool_students) < 2:
+        await update.message.reply_text("В пуле осталось меньше двух активных участников. Невозможно выбрать пару.")
+        return
+
+    # --- ИЗМЕНЕНО: Взвешенный выбор ---
+    weights = [1 + (student['duty_debt'] * DEBT_WEIGHT_MULTIPLIER) for student in pool_students]
     
-    if not winners:
-        if len(pool_students) < 2:
-            if not pool_students:
-                await update.message.reply_text("В пуле не осталось активных участников.")
-                return
-            winner = pool_students[0]
-            db_session.query(current_pool).delete()
-            db_session.query(last_winners).delete()
-            db_session.execute(last_winners.insert().values(name=winner['name'], username=winner['username']))
-            db_session.execute(students.update().where(students.c.username == winner['username']).values(duty_count=students.c.duty_count + 1))
-            db_session.commit()
-            message = (f"🏆 Остался последний герой: {winner['name']} {winner['username']}!\n\n"
-                       "Цикл завершен. Для начала нового введите `/reset`.")
-            await update.message.reply_text(message)
-            return
-        winners = random.sample(pool_students, 2)
+    # Выбираем двух разных победителей с учетом веса
+    winner1 = random.choices(pool_students, weights=weights, k=1)[0]
+    
+    # Удаляем первого победителя из списков для второго розыгрыша
+    temp_pool = pool_students.copy()
+    temp_weights = weights.copy()
+    winner1_index = temp_pool.index(winner1)
+    temp_pool.pop(winner1_index)
+    temp_weights.pop(winner1_index)
+    
+    winner2 = random.choices(temp_pool, weights=temp_weights, k=1)[0]
+    winners = [winner1, winner2]
 
     for winner in winners:
         db_session.execute(students.update().where(students.c.username == winner['username']).values(duty_count=students.c.duty_count + 1))
-        student_record = get_student_by_username(winner['username'])
-        if student_record and student_record.duty_debt > 0:
+        if winner['duty_debt'] > 0:
             db_session.execute(students.update().where(students.c.username == winner['username']).values(duty_debt=students.c.duty_debt - 1))
     
     for winner in winners:
@@ -196,7 +183,6 @@ async def go(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if student_record and student_record.chat_id:
             try:
                 await context.bot.send_message(chat_id=student_record.chat_id, text="👋 Привет! Напоминаю, что сегодня твоя очередь дежурить.")
-                logger.info(f"Отправлено личное уведомление для {winner['username']}")
             except Exception as e:
                 logger.error(f"Не удалось отправить личное уведомление для {winner['username']}: {e}")
 
@@ -291,13 +277,11 @@ async def skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def unskip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await skip_user(update, context, make_active=True)
 
-# --- ИЗМЕНЕНО: Команда /stats теперь показывает звания ---
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     all_students = db_session.query(students).order_by(students.c.duty_count.desc()).all()
     if not all_students:
         await update.message.reply_text("Список студентов пуст.")
         return
-    
     stats_lines = []
     medals = ["🥇", "🥈", "🥉"]
     for i, student in enumerate(all_students):
@@ -306,13 +290,32 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         debt_info = f" (долг: {student.duty_debt})" if student.duty_debt > 0 else ""
         status_info = " (неактивен)" if not student.is_active else ""
         stats_lines.append(f"{medal} {student.name} - {rank} ({student.duty_count} раз){debt_info}{status_info}")
-        
     message = "📊 **Рейтинг Хранителей Порядка:**\n\n" + "\n".join(stats_lines)
     await update.message.reply_text(message)
 
-# --- НОВАЯ КОМАНДА: Пасхалка ---
 async def gregory(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Ну конечно я буду и крутить, и накручивать, и никогда не буду дежурить.... Да. 😉")
+
+# --- НОВАЯ КОМАНДА: Накрутка статистики ---
+async def set_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.username not in ADMIN_USERNAMES:
+        await update.message.reply_text("⛔️ Только админ может накручивать очки!")
+        return
+    try:
+        username = context.args[0]
+        count = int(context.args[1])
+        if not username.startswith('@'):
+            username = '@' + username
+        
+        student_record = get_student_by_username(username)
+        if student_record:
+            db_session.execute(students.update().where(students.c.username == username).values(duty_count=count))
+            db_session.commit()
+            await update.message.reply_text(f"✅ Читерство удалось! Счетчик для {student_record.name} теперь равен {count}.")
+        else:
+            await update.message.reply_text(f"⚠️ Пользователь {username} не найден.")
+    except (IndexError, ValueError):
+        await update.message.reply_text("❌ Неверный формат. Используйте: `/set_stats @username <число>`")
 
 # --- БЛОК УПРАВЛЕНИЯ ПОЛЬЗОВАТЕЛЯМИ (без изменений) ---
 async def manage_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -413,7 +416,8 @@ application.add_handler(CommandHandler("stats", stats))
 application.add_handler(CommandHandler("debt", debt))
 application.add_handler(CommandHandler("skip", skip))
 application.add_handler(CommandHandler("unskip", unskip))
-application.add_handler(CommandHandler("gregory", gregory)) # Пасхалка
+application.add_handler(CommandHandler("gregory", gregory))
+application.add_handler(CommandHandler("set_stats", set_stats))
 application.add_handler(CallbackQueryHandler(button_handler))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
