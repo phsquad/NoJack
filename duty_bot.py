@@ -21,7 +21,7 @@ from sqlalchemy.exc import OperationalError, IntegrityError
 
 # --- НАСТРОЙКИ ---
 TOKEN = "8347643283:AAFKD80QRaKeU_g0A1Eav7UVVKHieOpUIKA"
-ADMIN_USERNAMES = ["phsquadd", "saduevvv18"]
+ADMIN_USERNAMES = ["phsquadd"]
 WEBHOOK_URL = "https://nojack.onrender.com"
 DATABASE_URL = os.environ.get('DATABASE_URL')
 
